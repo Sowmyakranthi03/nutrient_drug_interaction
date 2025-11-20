@@ -1,0 +1,2 @@
+https://www.kaggle.com/datasets/shayanhusain/drug-food-interactions-dataset?resource=download -- Kaggle
+https://aarpn.com/index.php/drug-nutrient-interaction-nutrient-databases-pathology-health-monographs/
