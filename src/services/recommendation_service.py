@@ -2,11 +2,9 @@
 
 import json
 import numpy as np
-import pandas as pd
 import joblib
 from sklearn.preprocessing import StandardScaler
 from sklearn.ensemble import RandomForestClassifier
-
 from src.services.interaction_service import InteractionService
 from src.services.nutrient_service import NutrientService
 
@@ -14,99 +12,93 @@ MODEL_PATH = "models/food_safety_model.pkl"
 SCALER_PATH = "models/food_scaler.pkl"
 INDEX_MAP_PATH = "models/food_index_map.json"
 
-
 class RecommendationService:
     def __init__(self):
-        # Initialize services
         self.interaction_service = InteractionService()
         self.nutrient_service = NutrientService()
 
-        # Build ML feature matrix from numeric nutrient values
-        self._prepare_features()
-
-        # Load or train ML model
+        # Try loading trained ML model
         try:
             self._load_model()
             print("✔ Model loaded successfully")
-        except Exception as e:
-            print("⚠ Model load failed, retraining...", e)
-            self._train_model()
+        except:
+            print("⚠ Model load failed — retraining...")
+            self._prepare_ml_data()
             self._save_model()
             print("✔ Model retrained and saved")
 
-    # ------------------------- Feature extraction -------------------------
-    def _prepare_features(self):
-        # Determine all numeric nutrient keys across all foods
-        all_keys = set()
-        for profile in self.nutrient_service.profile_map.values():
-            for k, v in profile.items():
-             if isinstance(v, (int, float)):
-                    all_keys.add(k)
-        self.numeric_keys = sorted(list(all_keys))  # fixed order for ML
-
-    # Build feature matrix
-        self.feature_matrix = []
-        for fk in self.nutrient_service.profile_map:
-            profile = self.nutrient_service.profile_map[fk]
-            row = [profile.get(k, 0.0) for k in self.numeric_keys]  # missing = 0
-            self.feature_matrix.append(row)
-        self.feature_matrix = np.array(self.feature_matrix)
-
+    # ---------------------------- ML DATA PREPARATION ----------------------------
+    def _prepare_ml_data(self):
+        """Prepare features and labels for ML training."""
         self.food_keys = list(self.nutrient_service.profile_map.keys())
-        self.food_index_map = {fk: i for i, fk in enumerate(self.food_keys)}
-       
+        feature_list = []
+        labels = []
 
-    # ------------------------- ML TRAINING -------------------------
-    def _train_model(self):
-        # Scale features
-        self.scaler = StandardScaler()
-        X_scaled = self.scaler.fit_transform(self.feature_matrix)
+        # Precompute all drug interactions
+        all_drugs = self.interaction_service.df['drug_name'].unique()
+        drug_interactions = {drug: set(self.interaction_service.get_drug_interactions(drug)) for drug in all_drugs}
 
-        # Generate labels: 1 = interacts with any drug, 0 = safe
-        y = []
         for fk in self.food_keys:
             profile = self.nutrient_service.profile_map[fk]
-            interacts = False
-            for drug in self.interaction_service.df['drug_name'].unique():
-                interacting_nutrients = self.interaction_service.get_drug_interactions(drug)
-                if any(n in profile for n in interacting_nutrients):
-                    interacts = True
-                    break
-            y.append(int(interacts))
-        y = np.array(y)
 
-        # Train RandomForestClassifier
+            # Extract numeric features
+            numeric_values = [float(v) for v in profile.values() if isinstance(v, (int, float))]
+            feature_list.append(numeric_values)
+
+            # Label = 1 if any nutrient interacts with any drug
+            unsafe = any(any(n in profile for n in nutrients) for nutrients in drug_interactions.values())
+            labels.append(int(unsafe))
+
+        # Pad numeric features to equal length
+        max_len = max(len(f) for f in feature_list)
+        self.feature_matrix = np.array([f + [0]*(max_len - len(f)) for f in feature_list])
+        self.y = np.array(labels)
+
+        # Scale features
+        self.scaler = StandardScaler()
+        self.X_scaled = self.scaler.fit_transform(self.feature_matrix)
+
+        # Train Random Forest
         self.model = RandomForestClassifier(n_estimators=100, random_state=42)
-        self.model.fit(X_scaled, y)
-        self.X_scaled = X_scaled  # save scaled features
+        self.model.fit(self.X_scaled, self.y)
 
-    # ------------------------- SAVE / LOAD MODEL -------------------------
-    def _save_model(self):
-        joblib.dump(self.model, MODEL_PATH)
-        joblib.dump(self.scaler, SCALER_PATH)
-        with open(INDEX_MAP_PATH, "w") as f:
-            json.dump(self.food_index_map, f)
+        # Map food keys to row indices
+        self.food_index_map = {fk: i for i, fk in enumerate(self.food_keys)}
 
+    # ---------------------------- MODEL LOAD/SAVE ----------------------------
     def _load_model(self):
         self.model = joblib.load(MODEL_PATH)
         self.scaler = joblib.load(SCALER_PATH)
         with open(INDEX_MAP_PATH, "r") as f:
             self.food_index_map = json.load(f)
-        # Scale features
+
+        # Reconstruct feature_matrix from nutrient_service
+        feature_list = []
+        for fk in self.food_index_map:
+            profile = self.nutrient_service.profile_map[fk]
+            numeric_values = [float(v) for v in profile.values() if isinstance(v, (int, float))]
+            feature_list.append(numeric_values)
+        max_len = max(len(f) for f in feature_list)
+        self.feature_matrix = np.array([f + [0]*(max_len - len(f)) for f in feature_list])
         self.X_scaled = self.scaler.transform(self.feature_matrix)
 
-    # ------------------------- RULE-BASED SAFE FOOD -------------------------
-    def recommend_safe_foods(self, drug_names, gender=None, age=None):
-        """
-        Return foods safe with a given drug or list of drugs.
-        Filters foods that contain any nutrient interacting with any drug.
-        """
-        if isinstance(drug_names, str):
-            drug_names = [drug_names]
+    def _save_model(self):
+        import os
+        os.makedirs("models", exist_ok=True)
+        joblib.dump(self.model, MODEL_PATH)
+        joblib.dump(self.scaler, SCALER_PATH)
+        with open(INDEX_MAP_PATH, "w") as f:
+            json.dump(self.food_index_map, f)
 
-        # Union of all interacting nutrients
+    # ---------------------------- SAFE FOOD RECOMMENDATION ----------------------------
+    def recommend_safe_foods(self, drug_list, gender=None, age=None):
+        """Return foods safe across multiple drugs, optionally filtered by RDI."""
+        if isinstance(drug_list, str):
+            drug_list = [drug_list]
+
+        # Aggregate all interacting nutrients
         bad_nutrients = set()
-        for drug in drug_names:
+        for drug in drug_list:
             bad_nutrients.update(self.interaction_service.get_drug_interactions(drug))
 
         safe_items = []
@@ -114,11 +106,11 @@ class RecommendationService:
             if any(n in bad_nutrients for n in profile):
                 continue
 
-            # Optionally filter by gender/age RDI
+            # Optional RDI check
             if gender and age:
                 rdi = self.nutrient_service.get_recommended_intake(gender, age)
-                meets = all(profile.get(n, 0) >= min_val for n, (min_val, _) in rdi.items())
-                if not meets:
+                meets_rdi = all(profile.get(n, 0) >= min_val for n, (min_val, _) in rdi.items())
+                if not meets_rdi:
                     continue
 
             safe_items.append({
@@ -128,35 +120,75 @@ class RecommendationService:
 
         return safe_items
 
-    # ------------------------- ML PREDICTION -------------------------
+    # ---------------------------- ML PREDICTION ----------------------------
+  
     def predict_food_safety(self, food_key):
-        """Return True if ML predicts food is safe, False if interacts, None if unknown."""
+        """ML predicts if a single food is safe (True) or unsafe (False)."""
         idx = self.food_index_map.get(food_key)
         if idx is None:
             return None
-        x = self.X_scaled[idx].reshape(1, -1)
-        pred = self.model.predict(x)
-        return bool(pred[0] == 0)
+        row_features = self.feature_matrix[idx]
+        scaled = self.scaler.transform([row_features])
+        pred = self.model.predict(scaled)
+        # Flip logic: 0 = safe, 1 = unsafe
+        return bool(pred[0] == 0)  # True if safe
 
-    def predict_food_proba(self, food_key):
-        """Return probability that food is safe (0-1)."""
+    def predict_proba(self, food_key):
+        """Probability that a food is safe (0=safe, 1=unsafe)."""
         idx = self.food_index_map.get(food_key)
         if idx is None:
             return None
-        x = self.X_scaled[idx].reshape(1, -1)
-        proba = self.model.predict_proba(x)[0][0]
-        return float(proba)
+        row_features = self.feature_matrix[idx]
+        scaled = self.scaler.transform([row_features])
+        proba = self.model.predict_proba(scaled)[0]
 
+        classes = list(self.model.classes_)
+        if 0 in classes:
+            safe_index = classes.index(0)  # index of "safe" class
+            return float(proba[safe_index])
+        else:
+        # Only unsafe class seen, probability of safe = 0
+            return 0.0
 
-# ------------------------- MANUAL TEST -------------------------
+    
+
+    # ---------------------------- DANGEROUS FOODS ----------------------------
+    def list_dangerous_foods(self, drug_list):
+        """Return foods potentially unsafe for a list of drugs."""
+        if isinstance(drug_list, str):
+            drug_list = [drug_list]
+
+        bad_nutrients = set()
+        for drug in drug_list:
+            bad_nutrients.update(self.interaction_service.get_drug_interactions(drug))
+
+        dangerous_items = []
+        for fk, profile in self.nutrient_service.profile_map.items():
+            if any(n in bad_nutrients for n in profile):
+                dangerous_items.append({
+                    "food_key": fk,
+                    "food_name": self.nutrient_service.food_name_map[fk],
+                    "ML_safe": self.predict_food_safety(fk),
+                    "Probability": self.predict_proba(fk)
+                })
+
+        dangerous_items.sort(key=lambda x: x["Probability"] if x["Probability"] is not None else 0)
+        return dangerous_items
+
+# ------------------- MANUAL TEST -------------------
 if __name__ == "__main__":
+    drugs = ["Warfarin", "Aspirin", "Clopidogrel", "Ibuprofen", "Heparin",
+             "Metformin", "Atorvastatin", "Omeprazole", "Lisinopril", "Simvastatin"]
+
     rec = RecommendationService()
 
-    drug_list = ["Warfarin", "Aspirin"]  # multiple drugs example
-    print(f"Top safe foods for {drug_list}:")
-    safe = rec.recommend_safe_foods(drug_list)
-    print(safe[:10])
+    safe_foods = rec.recommend_safe_foods(drugs)
+    print(f"✔ Top safe foods for {drugs}:")
+    for i, food in enumerate(safe_foods[:10], 1):
+        fk = food["food_key"]
+        print(f"{i}. {food['food_name']} (ML safe: {rec.predict_food_safety(fk)}, Probability: {rec.predict_proba(fk):.2f})")
 
-    first_food = list(rec.food_keys)[0]
-    print("ML prediction for first food:", rec.predict_food_safety(first_food))
-    print("ML probability for first food:", rec.predict_food_proba(first_food))
+    dangerous_foods = rec.list_dangerous_foods(drugs)
+    print(f"\n❌ Top potentially dangerous foods for {drugs}:")
+    for i, food in enumerate(dangerous_foods[:10], 1):
+        print(f"{i}. {food['food_name']} (ML safe: {food['ML_safe']}, Probability: {food['Probability']:.2f})")

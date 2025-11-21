@@ -1,24 +1,18 @@
-# ------------------------------------------------------------
-# TRAIN MACHINE LEARNING MODEL FOR FOOD SAFETY PREDICTION
-# ------------------------------------------------------------
+# src/ml/train_models.py
 
 import json
-import numpy as np
-import pandas as pd
-import joblib
 import os
-
+import numpy as np
+import joblib
 from sklearn.preprocessing import StandardScaler
 from sklearn.ensemble import RandomForestClassifier
 
 from src.services.interaction_service import InteractionService
 from src.services.nutrient_service import NutrientService
 
-
-OUTPUT_DIR = "models"
-MODEL_PATH = f"{OUTPUT_DIR}/food_safety_model.pkl"
-SCALER_PATH = f"{OUTPUT_DIR}/food_scaler.pkl"
-INDEX_MAP_PATH = f"{OUTPUT_DIR}/food_index_map.json"
+MODEL_PATH = "models/food_safety_model.pkl"
+SCALER_PATH = "models/food_scaler.pkl"
+INDEX_MAP_PATH = "models/food_index_map.json"
 
 
 def train_model():
@@ -26,64 +20,55 @@ def train_model():
     ns = NutrientService()
     isvc = InteractionService()
 
-    # Create model output directory
-    os.makedirs(OUTPUT_DIR, exist_ok=True)
+    os.makedirs("models", exist_ok=True)
 
-    print("📦 Building dataset for ML...")
+    print("📦 Preparing feature matrix and labels...")
 
-    all_food_keys = list(ns.profile_map.keys())
-    numeric_features = []
+    food_keys = list(ns.profile_map.keys())
+    feature_list = []
     labels = []
 
-    # Precompute drug interactions for speed
-    drug_interactions = {
-        drug: set(isvc.get_drug_interactions(drug))
-        for drug in isvc.df["drug_name"].unique()
-    }
+    # Precompute nutrient interactions per drug for efficiency
+    all_drugs = isvc.df["drug_name"].unique()
+    drug_interactions = {drug: set(isvc.get_drug_interactions(drug)) for drug in all_drugs}
 
-    # Build feature matrix and labels
-    for fk in all_food_keys:
+    for fk in food_keys:
         profile = ns.profile_map[fk]
 
-        # Extract numeric values
-        features = [v for v in profile.values() if isinstance(v, (int, float))]
-        numeric_features.append(features)
+        # Numeric features only
+        numeric_features = [float(v) for v in profile.values() if isinstance(v, (int, float))]
+        feature_list.append(numeric_features)
 
-        # Determine if food is UNSAFE (label=1)
-        unsafe = False
-        for nutrients in drug_interactions.values():
-            if any(n in profile for n in nutrients):
-                unsafe = True
-                break
-
+        # Label = 1 if any nutrient interacts with any drug
+        unsafe = any(any(n in profile for n in nutrients) for nutrients in drug_interactions.values())
         labels.append(int(unsafe))
 
-    # Normalize matrix size (pad)
-    max_len = max(len(f) for f in numeric_features)
-    X = np.array([f + [0] * (max_len - len(f)) for f in numeric_features])
+    # Pad numeric features to same length
+    max_len = max(len(f) for f in feature_list)
+    X = np.array([f + [0] * (max_len - len(f)) for f in feature_list])
     y = np.array(labels)
 
-    print(f"📏 Feature matrix: {X.shape}, Labels: {y.shape}")
+    print(f"📏 Feature matrix shape: {X.shape}, Labels shape: {y.shape}")
 
-    # Standardize features
+    # Scale features
     scaler = StandardScaler()
     X_scaled = scaler.fit_transform(X)
 
+    # Train RandomForest
     print("🌲 Training RandomForestClassifier...")
-    model = RandomForestClassifier(n_estimators=120, random_state=42)
+    model = RandomForestClassifier(n_estimators=100, random_state=42)
     model.fit(X_scaled, y)
 
+    # Save model, scaler, and index mapping
     print("💾 Saving model files...")
     joblib.dump(model, MODEL_PATH)
     joblib.dump(scaler, SCALER_PATH)
 
-    # Save food index map
-    food_index_map = {fk: i for i, fk in enumerate(all_food_keys)}
+    food_index_map = {fk: i for i, fk in enumerate(food_keys)}
     with open(INDEX_MAP_PATH, "w") as f:
         json.dump(food_index_map, f)
 
-    print("🎉 Training completed successfully!")
-    print("📁 Model saved in /models directory.")
+    print("🎉 Model trained and saved successfully!")
 
 
 if __name__ == "__main__":
