@@ -5,7 +5,8 @@ from pathlib import Path
 # Add src folder to Python path
 sys.path.append(str(Path(__file__).resolve().parent.parent / "src"))
 
-from services.recommendation_service import RecommendationService
+from src.services.recommendation_service import RecommendationService
+
 
 def main():
     rec_service = RecommendationService()
