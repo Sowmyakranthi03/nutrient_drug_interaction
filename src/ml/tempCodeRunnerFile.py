@@ -67,7 +67,7 @@ def train_model():
 
     joblib.dump(model, MODEL_PATH)
     joblib.dump(scaler, SCALER_PATH)
-    with open(INDEX_MAP_PATH, "w") as f:  
+    with open(INDEX_MAP_PATH, "w") as f:
         json.dump(food_index_map, f)
 
     print("\n✔ Training complete — model saved.")
