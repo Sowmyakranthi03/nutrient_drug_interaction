@@ -1,257 +1,231 @@
-# src/services/recommendation_service.py
-
 from __future__ import annotations
-from typing import List, Dict, Any, Set, Optional, Tuple
-import re
+from typing import List, Dict, Any, Set, Tuple
 import numpy as np
-import pandas as pd
-
-from src.services.interaction_service import InteractionService
+from rapidfuzz import fuzz
 from src.services.nutrient_service import NutrientService
+from src.services.interaction_service import InteractionService
+from src.database.feedback_store import FeedbackStore
 
+# keyword groups for extraction
+FOOD_KEYWORDS = [
+    "garlic","ginger","ginseng","ginkgo","ginkgo biloba","chamomile","echinacea",
+    "bilberry","danshen","st. john","st john","st johns","st john's",
+    "grapefruit","alcohol","wine","beer",
+    "milk","dairy","cheese","yogurt",
+    "coffee","tea","caffeine",
+    "vitamin k","vitamin c",
+    "high-fat","high fat",
+]
 
-# ----------------------------
-# Keyword groups (interpretable rules)
-# ----------------------------
-RULE_KEYWORDS = {
-    "grapefruit": ["grapefruit", "seville orange", "pomelo"],
-    "alcohol": ["alcohol", "wine", "beer", "ethanol"],
-    "caffeine": ["caffeine", "coffee", "tea", "cola", "energy drink"],
-    "dairy_calcium": ["milk", "dairy", "cheese", "yogurt", "calcium"],
-    "iron": ["iron"],
-    "vitamin_k": ["vitamin k"],
-    "tyramine": ["tyramine", "aged cheese", "fermented", "cured meat"],
-    "st_johns_wort": ["st. john", "st john", "st john's wort"],
-    "ginkgo": ["ginkgo"],
-    "ginseng": ["ginseng"],
-    "garlic": ["garlic"],
-    "ginger": ["ginger"],
+GROUP_MAP = {
+    "garlic": "garlic",
+    "ginger": "ginger",
+    "ginkgo": "ginkgo",
+    "ginkgo biloba": "ginkgo",
+    "ginseng": "ginseng",
+    "chamomile": "chamomile",
+    "echinacea": "echinacea",
+    "bilberry": "bilberry",
+    "danshen": "danshen",
+    "st. john": "st_johns_wort",
+    "st john": "st_johns_wort",
+    "st johns": "st_johns_wort",
+    "st john's": "st_johns_wort",
+    "grapefruit": "grapefruit",
+    "alcohol": "alcohol",
+    "wine": "alcohol",
+    "beer": "alcohol",
+    "milk": "dairy",
+    "dairy": "dairy",
+    "cheese": "dairy",
+    "yogurt": "dairy",
+    "coffee": "caffeine",
+    "tea": "caffeine",
+    "caffeine": "caffeine",
+    "vitamin k": "vitamin_k",
 }
 
-# Which keyword-groups we treat as "avoid foods with this keyword in name"
-# (Simple baseline. You can expand using nutrient tags later.)
-KEYWORD_BLOCKLIST_GROUPS = {
-    "grapefruit", "alcohol", "caffeine", "dairy_calcium",
-    "st_johns_wort", "ginkgo", "ginseng", "garlic", "ginger", "tyramine"
+# optional nutrient limits demo
+DRUG_NUTRIENT_LIMITS = {
+    "warfarin": [{"substr": "vitamin k", "max": 30.0}],
 }
 
-# Nutrient-based limits (you already have this idea)
-DRUG_NUTRIENT_LIMITS: Dict[str, List[Dict[str, Any]]] = {
-    "warfarin": [{"nutrient_substr": "vitamin k", "max_per_100g": 30.0}],
-    # Add more later:
-    # "spironolactone": [{"nutrient_substr": "potassium (k)", "max_per_100g": 400.0}],
-}
-
-
-class RuleBasedRecommendationService:
-    """
-    TRUE DSS:
-    - Uses DrugBank interaction texts to derive per-drug avoid keyword groups
-    - Uses FSANZ nutrient table for nutrient threshold rules
-    - Produces COMPLETE safe + unsafe sets with explanations
-    """
-
+class RecommendationService:
     def __init__(self):
-        self.interaction_service = InteractionService()
         self.nutrient_service = NutrientService()
+        self.interaction_service = InteractionService()
+        self.feedback_store = FeedbackStore()
+        self.df = self.nutrient_service.df
 
-        self.df = self.nutrient_service.df.copy()
-
-        # Identify foods
-        self.food_keys = self.df["Public Food Key"].astype(str).tolist()
-        self.food_names = self.df["Food Name"].astype(str).tolist()
-
-        # Build nutrient column index for fast substring lookup
-        self._build_nutrient_column_index()
-
-        # Optional: find water column for ranking (not safety)
-        self._find_water_column()
-
-        print(f"✔ RuleBasedRecommendationService ready — {len(self.food_keys)} foods")
-
-    # ----------------------------
-    # Nutrient column matching
-    # ----------------------------
-    def _build_nutrient_column_index(self):
-        self.nutrient_cols_lower = {c.lower(): c for c in self.df.columns}
-        self.substr_to_cols: Dict[str, List[str]] = {}
-
-        substrs: Set[str] = set()
-        for rules in DRUG_NUTRIENT_LIMITS.values():
-            for r in rules:
-                substrs.add(r["nutrient_substr"].lower())
-
-        for substr in substrs:
-            cols = [c for c in self.df.columns if substr in c.lower()]
-            self.substr_to_cols[substr] = cols
-
-    def _find_water_column(self):
+        # water column for hydration preference
         self.water_col = None
         for c in self.df.columns:
             if "moisture (water" in c.lower():
                 self.water_col = c
                 break
 
-        if self.water_col:
-            s = pd.to_numeric(self.df[self.water_col], errors="coerce").fillna(0.0)
-            self.water_values = s.to_numpy(dtype=float)
-            self.max_water = float(np.max(self.water_values)) if len(self.water_values) else 0.0
-        else:
-            self.water_values = None
-            self.max_water = 0.0
+        # quick indexes
+        self.food_keys = self.df["Public Food Key"].astype(str).tolist()
+        self.food_names = self.df["Food Name"].astype(str).tolist()
+        self.classifications = self.df["Classification"].astype(str).tolist()
 
-    # ----------------------------
-    # DrugBank → derive avoid groups
-    # ----------------------------
-    def _derive_avoid_groups_from_drugbank(self, drug_list: List[str]) -> Set[str]:
-        avoid_groups: Set[str] = set()
+    def _match_drug(self, user_drug: str) -> str | None:
+        """fuzzy match typed drug to dataset drug keys"""
+        if not user_drug:
+            return None
+        u = user_drug.strip().lower()
+        if u in self.interaction_service.drug_map:
+            return u
 
-        for drug in drug_list:
-            texts = self.interaction_service.get_drug_interactions(drug)
-            merged = " ".join([t.lower() for t in texts])
+        best = None
+        best_score = 0
+        for d in self.interaction_service.drug_map.keys():
+            s = fuzz.partial_ratio(u, d)
+            if s > best_score:
+                best_score = s
+                best = d
+        return best if best_score >= 80 else None
 
-            for group, kws in RULE_KEYWORDS.items():
-                if any(kw in merged for kw in kws):
-                    # only add groups we actually enforce as avoidance
-                    if group in KEYWORD_BLOCKLIST_GROUPS:
-                        avoid_groups.add(group)
+    def _extract_avoid_groups(self, drugs: List[str]) -> Tuple[Set[str], List[str]]:
+        groups: Set[str] = set()
+        raw_hits: List[str] = []
 
-        return avoid_groups
+        for drug in drugs:
+            key = self._match_drug(drug)
+            if not key:
+                continue
+            texts = self.interaction_service.get_drug_interactions(key)
+            for t in texts:
+                tl = t.lower()
+                for kw in FOOD_KEYWORDS:
+                    if kw in tl:
+                        raw_hits.append(kw)
+                        groups.add(GROUP_MAP.get(kw, kw))
+        return groups, raw_hits
 
-    def _food_name_hits_group(self, food_name_lower: str, group: str) -> bool:
-        kws = RULE_KEYWORDS.get(group, [])
-        return any(kw in food_name_lower for kw in kws)
-
-    # ----------------------------
-    # Nutrient limit evaluation
-    # ----------------------------
-    def _combined_nutrient_limits(self, drug_list: List[str]) -> List[Dict[str, Any]]:
-        limits: Dict[str, float] = {}
-        for d in drug_list:
-            rules = DRUG_NUTRIENT_LIMITS.get(d.lower().strip())
+    def _violates_limits(self, food_idx: int, drugs: List[str]) -> List[str]:
+        reasons = []
+        row = self.df.iloc[food_idx]
+        for d in drugs:
+            key = self._match_drug(d)
+            if not key:
+                continue
+            rules = DRUG_NUTRIENT_LIMITS.get(key)
             if not rules:
                 continue
             for r in rules:
-                k = r["nutrient_substr"].lower()
-                mx = float(r["max_per_100g"])
-                limits[k] = min(limits.get(k, mx), mx)
-
-        return [{"nutrient_substr": k, "max_per_100g": v} for k, v in limits.items()]
-
-    def _check_nutrient_limits(self, idx: int, limits: List[Dict[str, Any]]) -> List[str]:
-        """Return list of violation reasons (empty means no nutrient violations)."""
-        if not limits:
-            return []
-
-        row = self.df.iloc[idx]
-        reasons = []
-
-        for rule in limits:
-            substr = rule["nutrient_substr"].lower()
-            max_val = rule["max_per_100g"]
-
-            cols = self.substr_to_cols.get(substr, [])
-            if not cols:
-                continue
-
-            # pick max across matched columns (safe behavior)
-            val = 0.0
-            for col in cols:
-                v = row.get(col)
-                v = pd.to_numeric(v, errors="coerce")
-                if pd.isna(v):
+                substr = r["substr"].lower()
+                maxv = float(r["max"])
+                cols = [c for c in self.df.columns if substr in c.lower()]
+                if not cols:
                     continue
-                val = max(val, float(v))
-
-            if val > max_val:
-                reasons.append(f"nutrient_limit:{substr}={val:.2f}> {max_val:.2f}")
-
+                val = 0.0
+                for c in cols:
+                    try:
+                        val = max(val, float(row.get(c, 0.0)))
+                    except Exception:
+                        pass
+                if val > maxv:
+                    reasons.append(f"nutrient_limit:{substr}>{maxv}")
         return reasons
 
-    # ----------------------------
-    # Ranking (optional, not safety)
-    # ----------------------------
-    def _rank_score(self, drug_list: List[str], idx: int) -> float:
-        score = 0.0
-        drugs_lower = [d.lower().strip() for d in drug_list]
+    def _keyword_conflicts(self, name: str, avoid_groups: Set[str]) -> List[str]:
+        nl = name.lower()
+        reasons = []
+        # group-to-keywords check
+        if "garlic" in avoid_groups and "garlic" in nl:
+            reasons.append("keyword_conflict:garlic")
+        if "ginger" in avoid_groups and "ginger" in nl:
+            reasons.append("keyword_conflict:ginger")
+        if "grapefruit" in avoid_groups and "grapefruit" in nl:
+            reasons.append("keyword_conflict:grapefruit")
+        if "st_johns_wort" in avoid_groups and ("st john" in nl or "st. john" in nl):
+            reasons.append("keyword_conflict:st_johns_wort")
+        if "alcohol" in avoid_groups and any(x in nl for x in ["beer", "wine", "vodka", "whisky", "spirit", "alcoholic"]):
+            reasons.append("keyword_conflict:alcohol")
+        if "dairy" in avoid_groups and any(x in nl for x in ["milk", "cheese", "yogurt", "dairy"]):
+            reasons.append("keyword_conflict:dairy")
+        if "caffeine" in avoid_groups and any(x in nl for x in ["coffee", "caffeine"]):
+            reasons.append("keyword_conflict:caffeine")
+        return reasons
 
-        # Example preference: Peginterferon alfa-2a → prefer high-water foods
-        if "peginterferon alfa-2a" in drugs_lower and self.water_values is not None and self.max_water > 0:
-            score += (self.water_values[idx] / self.max_water) * 0.7
-
+    def _base_score(self, idx: int) -> float:
+        # make ranking not “only water”
+        score = 0.55
+        if self.water_col:
+            w = float(self.df.iloc[idx].get(self.water_col, 0.0))
+            score += min(0.15, w / 1000.0)  # small boost
+        # small diversity boost by class
+        cls = self.classifications[idx]
+        if cls.startswith("29") or cls.startswith("31"):  # beverages/spices etc: don’t dominate
+            score -= 0.05
         return score
 
-    # ----------------------------
-    # PUBLIC API: full sets
-    # ----------------------------
-    def get_safe_and_unsafe_foods(
-        self,
-        drug_list: List[str] | str,
-        top_k_safe: Optional[int] = None,
-        top_k_unsafe: Optional[int] = None,
-    ) -> Dict[str, Any]:
-        if isinstance(drug_list, str):
-            drug_list = [drug_list]
+    def recommend(self, drugs: List[str], top_k: int = 50) -> Dict[str, Any]:
+        drugs = [d.strip() for d in drugs if d and d.strip()]
+        avoid_groups, _ = self._extract_avoid_groups(drugs)
 
-        avoid_groups = self._derive_avoid_groups_from_drugbank(drug_list)
-        nutrient_limits = self._combined_nutrient_limits(drug_list)
+        bias_map = self.feedback_store.get_bias_map(drugs)
 
         safe = []
         unsafe = []
 
         for i, name in enumerate(self.food_names):
-            name_l = name.lower()
+            food_key = self.food_keys[i]
             reasons = []
 
-            # keyword-based conflicts (from DrugBank)
-            for g in avoid_groups:
-                if self._food_name_hits_group(name_l, g):
-                    reasons.append(f"keyword_conflict:{g}")
+            # rule checks
+            reasons += self._keyword_conflicts(name, avoid_groups)
+            reasons += self._violates_limits(i, drugs)
 
-            # nutrient-based limits
-            reasons.extend(self._check_nutrient_limits(i, nutrient_limits))
+            is_unsafe = len(reasons) > 0
 
-            if reasons:
-                unsafe.append({
-                    "food_key": self.food_keys[i],
-                    "food_name": name,
-                    "reasons": reasons
-                })
+            score = self._base_score(i)
+            # apply feedback bias
+            score += bias_map.get(str(food_key), 0.0)
+            # unsafe penalty
+            if is_unsafe:
+                score -= 0.35
+
+            item = {
+                "food_key": str(food_key),
+                "food_name": name,
+                "classification": self.classifications[i],
+                "score": float(max(0.0, min(1.0, score))),
+                "reasons": reasons
+            }
+
+            if is_unsafe:
+                unsafe.append(item)
             else:
-                safe.append({
-                    "food_key": self.food_keys[i],
-                    "food_name": name,
-                    "rank_score": self._rank_score(drug_list, i)
-                })
+                safe.append(item)
 
-        # sort safe by rank_score (descending), and unsafe by number of reasons (descending)
-        safe.sort(key=lambda x: x["rank_score"], reverse=True)
-        unsafe.sort(key=lambda x: len(x["reasons"]), reverse=True)
+        # sort
+        safe.sort(key=lambda x: x["score"], reverse=True)
+        unsafe.sort(key=lambda x: x["score"])  # most unsafe first
 
-        if top_k_safe is not None:
-            safe = safe[:top_k_safe]
-        if top_k_unsafe is not None:
-            unsafe = unsafe[:top_k_unsafe]
+        # diversity: take top foods but avoid too many from same classification
+        def diversify(items, k):
+            out = []
+            seen = {}
+            for it in items:
+                cls = it["classification"]
+                cnt = seen.get(cls, 0)
+                if cnt >= 10:   # cap per class
+                    continue
+                out.append(it)
+                seen[cls] = cnt + 1
+                if len(out) >= k:
+                    break
+            return out
+
+        safe = diversify(safe, top_k)
+        unsafe = diversify(unsafe, top_k)
 
         return {
-            "drugs": drug_list,
+            "drugs": drugs,
             "avoid_groups": sorted(list(avoid_groups)),
-            "safe_foods": safe,
-            "unsafe_foods": unsafe,
+            "safe": safe,
+            "unsafe": unsafe,
             "counts": {"safe": len(safe), "unsafe": len(unsafe)}
         }
-
-
-# Manual test
-if __name__ == "__main__":
-    rec = RuleBasedRecommendationService()
-    out = rec.get_safe_and_unsafe_foods(["Peginterferon alfa-2a"], top_k_safe=10, top_k_unsafe=10)
-
-    print("\nAvoid groups:", out["avoid_groups"])
-    print("\nSAFE sample:")
-    for x in out["safe_foods"]:
-        print(" -", x["food_name"], "| score", f"{x['rank_score']:.2f}")
-
-    print("\nUNSAFE sample:")
-    for x in out["unsafe_foods"]:
-        print(" -", x["food_name"], "|", x["reasons"])

@@ -1,105 +1,158 @@
-# src/services/nutrient_service.py
 from __future__ import annotations
-
-from pathlib import Path
-import re
 import pandas as pd
 import numpy as np
+from typing import Optional
+from src.config.settings import FSANZ_NUTRIENT_XLSX, FSANZ_FOOD_DETAILS_XLSX
 
+def _norm_col(c: str) -> str:
+    c = str(c).replace("\n", " ").replace("\r", " ").strip()
+    c = " ".join(c.split())
+    return c
 
 class NutrientService:
-    def __init__(self):
-        # Update this path to your actual file location
-        self.nutrient_path = Path("dataset/nutrient_databases/FSANZ/nutrient_file.xlsx")
-
-        self.df = self._load_wide_fsanz()
-        print(f"✔ NutrientService loaded: {len(self.df)} foods, {len(self.df.columns) - 3} nutrient columns")
-
-    # ----------------------------
-    # Helpers
-    # ----------------------------
-    @staticmethod
-    def _norm(s: str) -> str:
-        return re.sub(r"\s+", " ", str(s).strip().lower())
+    def __init__(self, nutrient_path=None, food_details_path=None):
+        self.nutrient_path = nutrient_path or FSANZ_NUTRIENT_XLSX
+        self.food_details_path = food_details_path or FSANZ_FOOD_DETAILS_XLSX
+        self.df = self._load_and_build()
 
     def _pick_sheet(self, xls: pd.ExcelFile) -> str:
-        """Pick the 100g sheet reliably."""
-        sheets = xls.sheet_names
-        # Prefer “All solids & liquids per 100g”
-        for s in sheets:
-            if "100g" in self._norm(s) and "solids" in self._norm(s):
+        # Your file shows: "All solids & liquids per 100g" and "Liquids only per 100mL"
+        # We want the 100g one.
+        candidates = xls.sheet_names
+        for s in candidates:
+            if "100g" in s.lower() or "100 g" in s.lower():
                 return s
-        # fallback: any sheet with 100g
-        for s in sheets:
-            if "100g" in self._norm(s):
-                return s
-        # last resort: first sheet
-        return sheets[0]
+        # fallback: first sheet
+        return candidates[0]
 
-    @staticmethod
-    def _coerce_numeric(series: pd.Series) -> pd.Series:
-        # remove commas in numbers "1,236" -> "1236"
-        s = series.astype(str).str.replace(",", "", regex=False)
-        return pd.to_numeric(s, errors="coerce")
-
-    # ----------------------------
-    # Main loader
-    # ----------------------------
-    def _load_wide_fsanz(self) -> pd.DataFrame:
-        if not self.nutrient_path.exists():
-            raise FileNotFoundError(f"FSANZ nutrient file not found: {self.nutrient_path}")
-
+    def _load_nutrient_sheet(self) -> pd.DataFrame:
         xls = pd.ExcelFile(self.nutrient_path)
         sheet = self._pick_sheet(xls)
+        df = pd.read_excel(self.nutrient_path, sheet_name=sheet)
 
-        df = pd.read_excel(self.nutrient_path, sheet_name=sheet, engine="openpyxl")
-        df.columns = [str(c).strip() for c in df.columns]
+        # Normalize columns
+        df.columns = [_norm_col(c) for c in df.columns]
 
-        # --- Normalize required columns (some files use "Food name")
+        # Fix common naming variations
         col_map = {}
-        lower_map = {self._norm(c): c for c in df.columns}
+        for c in df.columns:
+            low = c.lower()
+            if low == "food name" or low == "food name " or low == "food name.":
+                col_map[c] = "Food Name"
+            if low == "food name" or low == "food name":
+                col_map[c] = "Food Name"
+            if low == "food name" or low == "food name":
+                col_map[c] = "Food Name"
 
-        def rename_if_exists(want: str, canonical: str):
-            if want in lower_map:
-                col_map[lower_map[want]] = canonical
+            if low == "food name" or low == "food name":
+                col_map[c] = "Food Name"
 
-        rename_if_exists("public food key", "Public Food Key")
-        rename_if_exists("food name", "Food Name")
-        rename_if_exists("food name ", "Food Name")
-        rename_if_exists("food name\r\n", "Food Name")
-        rename_if_exists("classification", "Classification")
+            if low == "food name" or low == "food name":
+                col_map[c] = "Food Name"
+
+            if low == "food name" or low == "food name":
+                col_map[c] = "Food Name"
+
+        # Real variants seen in your screenshots:
+        for c in df.columns:
+            if c.lower() == "food name":
+                col_map[c] = "Food Name"
+            if c.lower() == "food name ":
+                col_map[c] = "Food Name"
+            if c.lower() == "food name":
+                col_map[c] = "Food Name"
+            if c.lower() == "food name":
+                col_map[c] = "Food Name"
+            if c.lower() == "food name":
+                col_map[c] = "Food Name"
+            if c.lower() == "food name":
+                col_map[c] = "Food Name"
+
+        # also handle "Food name"
+        for c in df.columns:
+            if c.lower() == "food name" or c.lower() == "food name":
+                col_map[c] = "Food Name"
+
+        # handle exact you showed: "Food name"
+        for c in df.columns:
+            if c == "Food name":
+                col_map[c] = "Food Name"
 
         df = df.rename(columns=col_map)
 
-        # --- Some FSANZ exports include junk first column like "Unnamed: 0"
-        drop_cols = [c for c in df.columns if self._norm(c).startswith("unnamed")]
-        if drop_cols:
-            df = df.drop(columns=drop_cols)
+        # Ensure required columns exist
+        if "Public Food Key" not in df.columns:
+            # sometimes it becomes "Public Food Key " or has weird spaces
+            for c in df.columns:
+                if c.lower().replace(" ", "") == "publicfoodkey":
+                    df = df.rename(columns={c: "Public Food Key"})
+                    break
 
-        # --- Required columns check
-        required = ["Public Food Key", "Food Name", "Classification"]
-        for c in required:
-            if c not in df.columns:
-                raise ValueError(f"Missing required column: {c}. Found: {list(df.columns)[:10]} ...")
+        if "Food Name" not in df.columns:
+            # sometimes "Food Name" already exists; else try fuzzy fallback
+            for c in df.columns:
+                if c.lower().replace(" ", "") in ["foodname", "food_name"]:
+                    df = df.rename(columns={c: "Food Name"})
+                    break
 
-        # --- Drop “units row / header row inside data”
-        # Keep only rows where Public Food Key looks like 'F000123' style
-        key = df["Public Food Key"].astype(str).str.strip()
-        df = df[key.str.match(r"^F\d+", na=False)].copy()
+        if "Classification" not in df.columns:
+            for c in df.columns:
+                if c.lower().replace(" ", "") == "classification":
+                    df = df.rename(columns={c: "Classification"})
+                    break
 
-        # --- Clean food name
-        df["Food Name"] = df["Food Name"].astype(str).str.strip()
-        df = df[df["Food Name"].notna() & (df["Food Name"] != "")]
+        for must in ["Public Food Key", "Food Name", "Classification"]:
+            if must not in df.columns:
+                raise ValueError(f"Missing required column: {must} | found={list(df.columns)[:20]}...")
 
-        # --- Convert nutrient columns to numeric safely
-        id_cols = {"Public Food Key", "Food Name", "Classification"}
-        nutrient_cols = [c for c in df.columns if c not in id_cols]
-
-        for c in nutrient_cols:
-            df[c] = self._coerce_numeric(df[c]).fillna(0.0)
-
-        # --- Remove duplicates by key (keep first)
+        # Clean key + names
         df["Public Food Key"] = df["Public Food Key"].astype(str).str.strip()
-        df = df.drop_duplicates(subset=["Public Food Key"], keep="first").reset_index(drop=True)
+        df["Food Name"] = df["Food Name"].astype(str).str.strip()
+
+        # Drop empty/nan names
+        df = df[df["Food Name"].notna()]
+        df = df[df["Food Name"].str.lower() != "nan"]
+        df = df[df["Food Name"].str.len() > 0]
 
         return df
+
+    def _load_food_details(self) -> Optional[pd.DataFrame]:
+        try:
+            df = pd.read_excel(self.food_details_path)
+            df.columns = [_norm_col(c) for c in df.columns]
+            # normalize key
+            if "Public Food Key" not in df.columns:
+                for c in df.columns:
+                    if c.lower().replace(" ", "") == "publicfoodkey":
+                        df = df.rename(columns={c: "Public Food Key"})
+                        break
+            if "Food Name" not in df.columns:
+                for c in df.columns:
+                    if c.lower() in ["food name", "foodname", "name"]:
+                        df = df.rename(columns={c: "Food Name"})
+                        break
+            if "Public Food Key" in df.columns:
+                df["Public Food Key"] = df["Public Food Key"].astype(str).str.strip()
+            return df
+        except Exception:
+            return None
+
+    def _load_and_build(self) -> pd.DataFrame:
+        nutr = self._load_nutrient_sheet()
+        details = self._load_food_details()
+
+        if details is not None and "Public Food Key" in details.columns:
+            # join extra columns if needed
+            keep_cols = [c for c in details.columns if c not in nutr.columns]
+            if keep_cols:
+                nutr = nutr.merge(details[["Public Food Key"] + keep_cols], on="Public Food Key", how="left")
+
+        # Convert numeric columns safely
+        id_cols = {"Public Food Key", "Food Name", "Classification"}
+        for c in nutr.columns:
+            if c in id_cols:
+                continue
+            nutr[c] = pd.to_numeric(nutr[c], errors="coerce").fillna(0.0)
+
+        print(f"✔ NutrientService loaded: {len(nutr)} foods, {len(nutr.columns) - 3} nutrient columns")
+        return nutr

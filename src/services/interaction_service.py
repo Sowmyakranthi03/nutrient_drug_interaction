@@ -1,47 +1,35 @@
-# src/services/interaction_service.py
-
 import json
+from typing import Dict, List
 from pathlib import Path
-
-# Your actual file based on your folder structure
-DRUG_FILE = Path("dataset/drug_food_interaction/drugbank_interaction.json")
-
+from src.config.settings import DRUGBANK_JSON
 
 class InteractionService:
-    """
-    Loads DrugBank food interaction data from JSON
-    and provides simple keyword extraction.
-    """
+    def __init__(self, path: Path | None = None):
+        self.path = Path(path) if path else Path(DRUGBANK_JSON)
+        self.drug_map: Dict[str, List[str]] = self._load()
 
-    def __init__(self):
-        if not DRUG_FILE.exists():
-            raise FileNotFoundError(f"DrugBank JSON file not found at {DRUG_FILE}")
+    def _load(self) -> Dict[str, List[str]]:
+        if not self.path.exists():
+            raise FileNotFoundError(f"DrugBank JSON not found: {self.path}")
 
-        # Load JSON: a list of objects like:
-        # { "name": "Lepirudin", "food_interactions": ["Avoid garlic", ...] }
-        with open(DRUG_FILE, "r", encoding="utf-8") as f:
-            self.data = json.load(f)
+        data = json.loads(self.path.read_text(encoding="utf-8"))
 
-        # Normalize drug names → interactions
-        self.drug_map = {}
-        for drug in self.data:
-            name = drug.get("name", "").lower().strip()
-            items = drug.get("food_interactions", [])
-            # Convert all interaction texts to lowercase
-            self.drug_map[name] = [i.lower() for i in items]
+        # expected: list[{name, food_interactions:[...]}]
+        drug_map: Dict[str, List[str]] = {}
+        for item in data:
+            name = str(item.get("name", "")).strip()
+            if not name:
+                continue
+            interactions = item.get("food_interactions") or []
+            interactions = [str(x).strip() for x in interactions if str(x).strip()]
+            drug_map[name.lower()] = interactions
 
-    def get_drug_interactions(self, drug_name: str):
-        """
-        Returns a list of food interaction texts for a given drug.
-        Example: ["avoid garlic", "avoid ginger"]
+        return drug_map
 
-        ALWAYS in lowercase.
-        """
-        key = drug_name.lower().strip()
-        return self.drug_map.get(key, [])
+    def list_drugs(self) -> List[str]:
+        return sorted([k for k in self.drug_map.keys()])
 
-    def get_all_drug_names(self):
-        """
-        Returns list of all drug names in lowercase.
-        """
-        return list(self.drug_map.keys())
+    def get_drug_interactions(self, drug_name: str) -> List[str]:
+        if not drug_name:
+            return []
+        return self.drug_map.get(drug_name.strip().lower(), [])

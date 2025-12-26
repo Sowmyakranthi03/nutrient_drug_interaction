@@ -18,3 +18,10 @@ jstyleson
 rdflib
 pyarrow
 unicode
+fastapi
+uvicorn
+pydantic
+pandas
+numpy
+openpyxl
+rapidfuzz

@@ -1,0 +1,279 @@
+/* =========================
+   Theme tokens
+========================= */
+:root{
+  --bg:#f6f7fb;
+  --card:#ffffff;
+  --text:#111111;
+  --muted:#5a5a5a;
+  --border:#e6e6e6;
+  --shadow: rgba(0,0,0,0.06);
+
+  --btn:#111111;
+  --btnText:#ffffff;
+
+  --danger:#a00000;
+  --error:#b00000;
+}
+
+[data-theme="dark"]{
+  --bg:#0b0f19;
+  --card:#0f1629;
+  --text:#eef2ff;
+  --muted:#b7c0d8;
+  --border:#26314d;
+  --shadow: rgba(0,0,0,0.35);
+
+  --btn:#eef2ff;
+  --btnText:#0b0f19;
+
+  --danger:#ff8080;
+  --error:#ff6b6b;
+}
+
+/* =========================
+   Base layout
+========================= */
+* { box-sizing: border-box; }
+
+html, body {
+  margin: 0;
+  padding: 0;
+  background: var(--bg);
+  color: var(--text);
+  font-family: system-ui, Arial, sans-serif;
+}
+
+.page{
+  min-height: 100vh;
+  background: var(--bg);
+  color: var(--text);
+}
+
+.container{
+  max-width: 1100px;
+  margin: 0 auto;
+  padding: 22px;
+}
+
+.header{
+  display:flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 14px;
+  margin-bottom: 14px;
+}
+
+.title{
+  margin: 0 0 6px 0;
+}
+
+.subtitle{
+  margin: 0;
+  color: var(--muted);
+}
+
+/* =========================
+   Components
+========================= */
+.card{
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  padding: 14px;
+  background: var(--card);
+  box-shadow: 0 1px 10px var(--shadow);
+}
+
+.badge{
+  display:inline-block;
+  padding: 4px 10px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  font-size: 12px;
+  margin-right: 8px;
+  margin-bottom: 8px;
+  background: color-mix(in srgb, var(--card), var(--bg) 30%);
+}
+
+.grid-2{
+  display:grid;
+  grid-template-columns: 1.2fr 0.8fr;
+  gap: 14px;
+}
+
+@media (max-width: 960px){
+  .grid-2{ grid-template-columns: 1fr; }
+}
+
+.h3{
+  margin-top: 0;
+}
+
+.h4{
+  margin: 8px 0;
+}
+
+.row{
+  display:flex;
+  gap: 10px;
+  align-items: center;
+}
+
+.input{
+  width: 100%;
+  padding: 10px;
+  border-radius: 10px;
+  border: 1px solid var(--border);
+  outline: none;
+  background: var(--card);
+  color: var(--text);
+}
+
+.input:focus{
+  border-color: color-mix(in srgb, var(--border), var(--text) 15%);
+}
+
+.label{
+  display:block;
+  font-size: 13px;
+  color: var(--muted);
+  margin-bottom: 6px;
+}
+
+/* buttons */
+.btn{
+  padding: 10px 14px;
+  border-radius: 12px;
+  border: 1px solid var(--border);
+  background: var(--card);
+  color: var(--text);
+  cursor: pointer;
+  font-weight: 700;
+}
+
+.btn:hover{ filter: brightness(1.02); }
+
+.btn-primary{
+  border: 1px solid color-mix(in srgb, var(--btn), #000 10%);
+  background: var(--btn);
+  color: var(--btnText);
+}
+
+.btn-ghost{
+  background: var(--card);
+}
+
+.btn-block{
+  width: 100%;
+  margin-top: 12px;
+  padding: 12px 14px;
+}
+
+.btn:disabled{
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+/* chips */
+.chips{
+  margin-top: 10px;
+}
+
+.chip{
+  margin: 6px 6px 0 0;
+  padding: 7px 10px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  background: var(--card);
+  cursor: pointer;
+  font-size: 12px;
+  color: var(--text);
+}
+
+.chip:hover{ filter: brightness(1.03); }
+
+/* selected list */
+.selected{ margin-top: 14px; }
+
+.selectedWrap{ display:flex; flex-wrap: wrap; }
+
+.selectedItem{
+  display:inline-flex;
+  align-items:center;
+  margin-right: 8px;
+  margin-bottom: 8px;
+}
+
+.remove{
+  margin-left: -6px;
+  border: none;
+  background: transparent;
+  cursor: pointer;
+  color: var(--danger);
+  font-weight: 800;
+  font-size: 18px;
+  line-height: 1;
+}
+
+/* meta/errors */
+.muted{ color: var(--muted); }
+
+.error{
+  margin-top: 10px;
+  color: var(--error);
+}
+
+.meta{
+  margin-top: 14px;
+  font-size: 13px;
+  color: var(--muted);
+  display:flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.mt{ margin-top: 14px; }
+
+/* foods list */
+.foodRow{
+  padding: 10px 0;
+  border-bottom: 1px solid color-mix(in srgb, var(--border), transparent 35%);
+}
+
+.foodTop{
+  display:flex;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.foodName{
+  font-weight: 800;
+}
+
+.foodMeta{
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.reasons{
+  font-size: 12px;
+  color: var(--danger);
+  margin-top: 4px;
+}
+
+.votes{
+  display:flex;
+  gap: 8px;
+  align-items: flex-start;
+}
+
+.miniBtn{
+  padding: 8px 10px;
+  border-radius: 10px;
+  border: 1px solid var(--border);
+  background: var(--card);
+  color: var(--text);
+  cursor: pointer;
+}
+
+.miniBtn:hover{ filter: brightness(1.03); }
