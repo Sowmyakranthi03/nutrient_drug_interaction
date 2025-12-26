@@ -8,7 +8,16 @@ from typing import List, Optional, Literal, Dict, Any
 from src.services.recommendation_service import RecommendationService
 
 
-app = FastAPI(title="Nutrient–Drug Interaction DSS", version="1.0")
+app = FastAPI()
+@app.get("/")
+def root():
+    return {
+        "service": "Nutrient–Drug Interaction API",
+        "status": "ok",
+        "docs": "/docs",
+        "health": "/health",
+    }
+
 
 # React dev server
 app.add_middleware(
@@ -16,6 +25,7 @@ app.add_middleware(
     allow_origins=[
         "http://localhost:5173",
         "http://127.0.0.1:5173",
+        "https://nutrient-drug-interaction.vercel.app/",
     ],
     allow_credentials=True,
     allow_methods=["*"],
