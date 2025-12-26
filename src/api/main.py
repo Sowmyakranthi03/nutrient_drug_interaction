@@ -1,41 +1,35 @@
 from __future__ import annotations
 
+from typing import List, Literal, Dict, Any
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import RedirectResponse
 from pydantic import BaseModel
-from typing import List, Optional, Literal, Dict, Any
 
 from src.services.recommendation_service import RecommendationService
 
+app = FastAPI(title="Nutrient–Drug Interaction API")
 
-app = FastAPI()
-@app.get("/")
+# ✅ Root: redirect to Swagger docs
+@app.get("/", include_in_schema=False)
 def root():
-    return {
-        "service": "Nutrient–Drug Interaction API",
-        "status": "ok",
-        "docs": "/docs",
-        "health": "/health",
-    }
-from fastapi.responses import RedirectResponse
-
-@app.get("/")
-def root():
-    # redirect to swagger docs
     return RedirectResponse(url="/docs")
 
-@app.get("/favicon.ico")
+# ✅ Avoid noisy 404 logs from bots
+@app.get("/favicon.ico", include_in_schema=False)
 def favicon():
     return {"ok": True}
 
-
-# React dev server
+# ✅ CORS (IMPORTANT: no trailing slash)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
         "http://localhost:5173",
         "http://127.0.0.1:5173",
-        "https://nutrient-drug-interaction.vercel.app/",
+        "https://nutrient-drug-interaction.vercel.app",
+        # If you have a custom domain later, add it here too
+        # "https://your-domain.com",
     ],
     allow_credentials=True,
     allow_methods=["*"],
@@ -63,7 +57,6 @@ def health():
 
 @app.get("/drugs")
 def drugs():
-    # show all drug names available in DrugBank json
     return {"drugs": sorted(list(rec.interaction_service.drug_map.keys()))}
 
 
@@ -74,13 +67,7 @@ def recommend(payload: RecommendRequest) -> Dict[str, Any]:
 
 @app.post("/feedback")
 def feedback(payload: FeedbackRequest):
-    # You already built FeedbackStore – call its API here
-    # I’m assuming these names; if your FeedbackStore uses different names,
-    # just replace these two calls.
-
-    if payload.vote == "up":
-        rec.feedback_store.add_feedback(payload.drugs, payload.food_key, +1)
-    else:
-        rec.feedback_store.add_feedback(payload.drugs, payload.food_key, -1)
-
+    # vote: "up" -> +1, "down" -> -1
+    delta = +1 if payload.vote == "up" else -1
+    rec.feedback_store.add_feedback(payload.drugs, payload.food_key, delta)
     return {"status": "ok"}
