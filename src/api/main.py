@@ -27,9 +27,8 @@ app.add_middleware(
     allow_origins=[
         "http://localhost:5173",
         "http://127.0.0.1:5173",
-        "https://nutrient-drug-interaction.vercel.app",
-        # If you have a custom domain later, add it here too
-        # "https://your-domain.com",
+        "https://nutrient-drug-interaction-a260nil7s-sowmya-kranthis-projects.vercel.app/",
+        
     ],
     allow_credentials=True,
     allow_methods=["*"],
