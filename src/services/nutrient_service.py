@@ -2,130 +2,104 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Dict, Any
-
+import re
 import pandas as pd
-
-# ---- NEW PATH LOGIC ----
-# Base directory = project root (one level above "src")
-BASE_DIR = Path(__file__).resolve().parents[2]
-FSANZ_NUTRIENT_FILE = BASE_DIR /"dataset"/ "nutrient_databases" / "FSANZ" / "nutrient_file.xlsx"  
-
-# Sheet names in your screenshot
-SHEET_SOLIDS_100G = "All solids & liquids per 100g"
-SHEET_LIQUIDS_100ML = "Liquids only per 100mL"
+import numpy as np
 
 
 class NutrientService:
-    """
-    Loads FSANZ nutrient data in wide format.
-
-    Exposes:
-      - self.food_name_map: { food_key -> "Food Name" }
-      - self.profile_map:   { food_key -> { nutrient_name -> value } }
-
-    Nutrient values are per 100 g (or 100 mL for liquids sheet).
-    """
-
     def __init__(self):
-        if not FSANZ_NUTRIENT_FILE.exists():
-            raise FileNotFoundError(f"FSANZ nutrient file not found at {FSANZ_NUTRIENT_FILE}")
+        # Update this path to your actual file location
+        self.nutrient_path = Path("dataset/nutrient_databases/FSANZ/nutrient_file.xlsx")
 
-        # Read both sheets if they exist, then concat
-        dfs = []
+        self.df = self._load_wide_fsanz()
+        print(f"✔ NutrientService loaded: {len(self.df)} foods, {len(self.df.columns) - 3} nutrient columns")
 
-        # Solids / general foods
-        try:
-            df_solids = pd.read_excel(
-                FSANZ_NUTRIENT_FILE,
-                sheet_name=SHEET_SOLIDS_100G,
-            )
-            dfs.append(df_solids)
-        except ValueError:
-            # sheet might not exist, ignore
-            pass
+    # ----------------------------
+    # Helpers
+    # ----------------------------
+    @staticmethod
+    def _norm(s: str) -> str:
+        return re.sub(r"\s+", " ", str(s).strip().lower())
 
-        # Liquids per 100 mL (optional)
-        try:
-            df_liquids = pd.read_excel(
-                FSANZ_NUTRIENT_FILE,
-                sheet_name=SHEET_LIQUIDS_100ML,
-            )
-            dfs.append(df_liquids)
-        except ValueError:
-            pass
+    def _pick_sheet(self, xls: pd.ExcelFile) -> str:
+        """Pick the 100g sheet reliably."""
+        sheets = xls.sheet_names
+        # Prefer “All solids & liquids per 100g”
+        for s in sheets:
+            if "100g" in self._norm(s) and "solids" in self._norm(s):
+                return s
+        # fallback: any sheet with 100g
+        for s in sheets:
+            if "100g" in self._norm(s):
+                return s
+        # last resort: first sheet
+        return sheets[0]
 
-        if not dfs:
-            raise ValueError(
-                f"No usable sheets found in {FSANZ_NUTRIENT_FILE}. "
-                f"Expected '{SHEET_SOLIDS_100G}' or '{SHEET_LIQUIDS_100ML}'."
-            )
+    @staticmethod
+    def _coerce_numeric(series: pd.Series) -> pd.Series:
+        # remove commas in numbers "1,236" -> "1236"
+        s = series.astype(str).str.replace(",", "", regex=False)
+        return pd.to_numeric(s, errors="coerce")
 
-        df = pd.concat(dfs, ignore_index=True)
+    # ----------------------------
+    # Main loader
+    # ----------------------------
+    def _load_wide_fsanz(self) -> pd.DataFrame:
+        if not self.nutrient_path.exists():
+            raise FileNotFoundError(f"FSANZ nutrient file not found: {self.nutrient_path}")
 
-        # Normalise column names a bit
+        xls = pd.ExcelFile(self.nutrient_path)
+        sheet = self._pick_sheet(xls)
+
+        df = pd.read_excel(self.nutrient_path, sheet_name=sheet, engine="openpyxl")
         df.columns = [str(c).strip() for c in df.columns]
 
-        required = ["Public Food Key", "Food Name"]
-        for col in required:
-            if col not in df.columns:
-                raise ValueError(f"Expected column '{col}' in nutrient_file.xlsx")
+        # --- Normalize required columns (some files use "Food name")
+        col_map = {}
+        lower_map = {self._norm(c): c for c in df.columns}
 
-        self.df = df
+        def rename_if_exists(want: str, canonical: str):
+            if want in lower_map:
+                col_map[lower_map[want]] = canonical
 
-        # Build food name map
-        self.food_name_map: Dict[str, str] = {}
-        for _, row in df[["Public Food Key", "Food Name"]].dropna().iterrows():
-            fk = str(row["Public Food Key"]).strip()
-            self.food_name_map[fk] = str(row["Food Name"]).strip()
+        rename_if_exists("public food key", "Public Food Key")
+        rename_if_exists("food name", "Food Name")
+        rename_if_exists("food name ", "Food Name")
+        rename_if_exists("food name\r\n", "Food Name")
+        rename_if_exists("classification", "Classification")
 
-        # Nutrient columns = everything except identifiers
+        df = df.rename(columns=col_map)
+
+        # --- Some FSANZ exports include junk first column like "Unnamed: 0"
+        drop_cols = [c for c in df.columns if self._norm(c).startswith("unnamed")]
+        if drop_cols:
+            df = df.drop(columns=drop_cols)
+
+        # --- Required columns check
+        required = ["Public Food Key", "Food Name", "Classification"]
+        for c in required:
+            if c not in df.columns:
+                raise ValueError(f"Missing required column: {c}. Found: {list(df.columns)[:10]} ...")
+
+        # --- Drop “units row / header row inside data”
+        # Keep only rows where Public Food Key looks like 'F000123' style
+        key = df["Public Food Key"].astype(str).str.strip()
+        df = df[key.str.match(r"^F\d+", na=False)].copy()
+
+        # --- Clean food name
+        df["Food Name"] = df["Food Name"].astype(str).str.strip()
+        df = df[df["Food Name"].notna() & (df["Food Name"] != "")]
+
+        # --- Convert nutrient columns to numeric safely
         id_cols = {"Public Food Key", "Food Name", "Classification"}
         nutrient_cols = [c for c in df.columns if c not in id_cols]
 
-        # Build profile_map: food_key -> {nutrient_name -> value}
-        self.profile_map: Dict[str, Dict[str, float]] = {}
+        for c in nutrient_cols:
+            df[c] = self._coerce_numeric(df[c]).fillna(0.0)
 
-        for _, row in df.iterrows():
-            fk_raw = row.get("Public Food Key")
-            if pd.isna(fk_raw):
-                continue
-            fk = str(fk_raw).strip()
+        # --- Remove duplicates by key (keep first)
+        df["Public Food Key"] = df["Public Food Key"].astype(str).str.strip()
+        df = df.drop_duplicates(subset=["Public Food Key"], keep="first").reset_index(drop=True)
 
-            nutrient_profile: Dict[str, float] = {}
-            for col in nutrient_cols:
-                val = row.get(col)
-                if pd.isna(val):
-                    continue
-
-                # Some values might come as strings with commas; coerce to float safely
-                v = pd.to_numeric(val, errors="coerce")
-                if pd.isna(v):
-                    continue
-
-                nutrient_profile[col] = float(v)
-
-            # Only store if we have at least one nutrient
-            if nutrient_profile:
-                self.profile_map[fk] = nutrient_profile
-            else:
-                # still make sure food has an entry (empty dict)
-                self.profile_map.setdefault(fk, {})
-
-        print(
-            f"✔ NutrientService loaded: {len(self.food_name_map)} foods, "
-            f"{len(nutrient_cols)} nutrient columns"
-        )
-
-    # ------------------------------------------------------------------
-    def get_recommended_intake(self, gender: str, age: int) -> Dict[str, tuple[float, float] | Any]:
-        """
-        Placeholder RDI function.
-
-        Return mapping:
-          nutrient_name -> (min_value_per_100g, max_value_per_100g or None)
-
-        For now we return an empty dict so that RDI filtering
-        does nothing. You can fill this with real values later.
-        """
-        return {}
+        return df
