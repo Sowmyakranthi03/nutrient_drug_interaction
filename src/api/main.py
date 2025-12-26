@@ -17,6 +17,16 @@ def root():
         "docs": "/docs",
         "health": "/health",
     }
+from fastapi.responses import RedirectResponse
+
+@app.get("/")
+def root():
+    # redirect to swagger docs
+    return RedirectResponse(url="/docs")
+
+@app.get("/favicon.ico")
+def favicon():
+    return {"ok": True}
 
 
 # React dev server
