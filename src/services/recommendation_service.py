@@ -1,12 +1,20 @@
 from __future__ import annotations
+
+import json
+import os
 from typing import List, Dict, Any, Set, Tuple
+
+import joblib
 import numpy as np
 from rapidfuzz import fuzz
+
 from src.services.nutrient_service import NutrientService
 from src.services.interaction_service import InteractionService
 from src.database.feedback_store import FeedbackStore
 
-# keyword groups for extraction
+# ---------------------------
+# RULE KEYWORDS (same as before)
+# ---------------------------
 FOOD_KEYWORDS = [
     "garlic","ginger","ginseng","ginkgo","ginkgo biloba","chamomile","echinacea",
     "bilberry","danshen","st. john","st john","st johns","st john's",
@@ -45,32 +53,70 @@ GROUP_MAP = {
     "vitamin k": "vitamin_k",
 }
 
-# optional nutrient limits demo
 DRUG_NUTRIENT_LIMITS = {
     "warfarin": [{"substr": "vitamin k", "max": 30.0}],
 }
 
+# ---------------------------
+# RF ARTIFACT PATHS
+# ---------------------------
+RF_MODEL_PATH = "models/rf_food_safety.pkl"
+RF_SCALER_PATH = "models/rf_scaler.pkl"
+RF_FEATURE_ORDER_PATH = "models/rf_feature_order.json"
+
+
 class RecommendationService:
+    """
+    Hybrid DSS:
+    - Rule-based safety screening (hard constraints)
+    - ML (Random Forest) gives unsafe probability to improve ranking
+    - FeedbackStore adds personalization bias
+    """
     def __init__(self):
         self.nutrient_service = NutrientService()
         self.interaction_service = InteractionService()
         self.feedback_store = FeedbackStore()
         self.df = self.nutrient_service.df
 
-        # water column for hydration preference
-        self.water_col = None
-        for c in self.df.columns:
-            if "moisture (water" in c.lower():
-                self.water_col = c
-                break
+        # Load ML model if available
+        self.rf_model = None
+        self.rf_scaler = None
+        self.rf_features = None
+        self._load_rf_if_available()
 
         # quick indexes
         self.food_keys = self.df["Public Food Key"].astype(str).tolist()
         self.food_names = self.df["Food Name"].astype(str).tolist()
         self.classifications = self.df["Classification"].astype(str).tolist()
 
+        # water column for mild preference (optional)
+        self.water_col = None
+        for c in self.df.columns:
+            if "moisture (water" in c.lower():
+                self.water_col = c
+                break
+
+        # numeric feature columns available
+        self.id_cols = {"Public Food Key", "Food Name", "Classification"}
+        self.numeric_cols = [c for c in self.df.columns if c not in self.id_cols]
+
+    def _load_rf_if_available(self):
+        if os.path.exists(RF_MODEL_PATH) and os.path.exists(RF_SCALER_PATH) and os.path.exists(RF_FEATURE_ORDER_PATH):
+            try:
+                self.rf_model = joblib.load(RF_MODEL_PATH)
+                self.rf_scaler = joblib.load(RF_SCALER_PATH)
+                with open(RF_FEATURE_ORDER_PATH, "r", encoding="utf-8") as f:
+                    self.rf_features = json.load(f)
+                print("✔ RF model loaded:", RF_MODEL_PATH)
+            except Exception as e:
+                print("⚠ RF model load failed:", e)
+                self.rf_model = None
+                self.rf_scaler = None
+                self.rf_features = None
+        else:
+            print("ℹ RF model not found. Using rule-based ranking only.")
+
     def _match_drug(self, user_drug: str) -> str | None:
-        """fuzzy match typed drug to dataset drug keys"""
         if not user_drug:
             return None
         u = user_drug.strip().lower()
@@ -132,7 +178,6 @@ class RecommendationService:
     def _keyword_conflicts(self, name: str, avoid_groups: Set[str]) -> List[str]:
         nl = name.lower()
         reasons = []
-        # group-to-keywords check
         if "garlic" in avoid_groups and "garlic" in nl:
             reasons.append("keyword_conflict:garlic")
         if "ginger" in avoid_groups and "ginger" in nl:
@@ -149,22 +194,42 @@ class RecommendationService:
             reasons.append("keyword_conflict:caffeine")
         return reasons
 
+    def _ml_unsafe_probability(self, idx: int) -> float:
+        """
+        Returns probability that a food is UNSAFE from RF model.
+        If model missing, returns neutral 0.5.
+        """
+        if not self.rf_model or not self.rf_scaler or not self.rf_features:
+            return 0.5
+
+        row = self.df.iloc[idx]
+        # Ensure we feed exactly the same feature order used in training
+        x = []
+        for c in self.rf_features:
+            try:
+                x.append(float(row.get(c, 0.0)))
+            except Exception:
+                x.append(0.0)
+
+        X = np.array([x], dtype=float)
+        Xs = self.rf_scaler.transform(X)
+
+        try:
+            proba_unsafe = float(self.rf_model.predict_proba(Xs)[0][1])
+            return max(0.0, min(1.0, proba_unsafe))
+        except Exception:
+            return 0.5
+
     def _base_score(self, idx: int) -> float:
-        # make ranking not “only water”
         score = 0.55
         if self.water_col:
             w = float(self.df.iloc[idx].get(self.water_col, 0.0))
-            score += min(0.15, w / 1000.0)  # small boost
-        # small diversity boost by class
-        cls = self.classifications[idx]
-        if cls.startswith("29") or cls.startswith("31"):  # beverages/spices etc: don’t dominate
-            score -= 0.05
+            score += min(0.10, w / 1200.0)  # smaller boost than earlier
         return score
 
     def recommend(self, drugs: List[str], top_k: int = 50) -> Dict[str, Any]:
         drugs = [d.strip() for d in drugs if d and d.strip()]
         avoid_groups, _ = self._extract_avoid_groups(drugs)
-
         bias_map = self.feedback_store.get_bias_map(drugs)
 
         safe = []
@@ -173,45 +238,54 @@ class RecommendationService:
         for i, name in enumerate(self.food_names):
             food_key = self.food_keys[i]
             reasons = []
-
-            # rule checks
             reasons += self._keyword_conflicts(name, avoid_groups)
             reasons += self._violates_limits(i, drugs)
 
-            is_unsafe = len(reasons) > 0
+            rule_unsafe = len(reasons) > 0
 
+            # ML probability of UNSAFE
+            p_unsafe = self._ml_unsafe_probability(i)
+
+            # score strategy:
+            # - base score
+            # - penalize by ML unsafe probability
+            # - apply feedback bias
+            # - heavy penalty if rule unsafe (hard constraint)
             score = self._base_score(i)
-            # apply feedback bias
+
+            # ML penalty: the more unsafe probability, the lower the score
+            score -= 0.40 * p_unsafe
+
+            # feedback bias
             score += bias_map.get(str(food_key), 0.0)
-            # unsafe penalty
-            if is_unsafe:
-                score -= 0.35
+
+            if rule_unsafe:
+                score -= 0.40  # hard constraint penalty
 
             item = {
                 "food_key": str(food_key),
                 "food_name": name,
                 "classification": self.classifications[i],
                 "score": float(max(0.0, min(1.0, score))),
+                "ml_unsafe_prob": float(p_unsafe),
                 "reasons": reasons
             }
 
-            if is_unsafe:
+            if rule_unsafe:
                 unsafe.append(item)
             else:
                 safe.append(item)
 
-        # sort
         safe.sort(key=lambda x: x["score"], reverse=True)
-        unsafe.sort(key=lambda x: x["score"])  # most unsafe first
+        unsafe.sort(key=lambda x: x["score"])  # worst first
 
-        # diversity: take top foods but avoid too many from same classification
         def diversify(items, k):
             out = []
             seen = {}
             for it in items:
                 cls = it["classification"]
                 cnt = seen.get(cls, 0)
-                if cnt >= 10:   # cap per class
+                if cnt >= 10:
                     continue
                 out.append(it)
                 seen[cls] = cnt + 1
@@ -227,5 +301,10 @@ class RecommendationService:
             "avoid_groups": sorted(list(avoid_groups)),
             "safe": safe,
             "unsafe": unsafe,
-            "counts": {"safe": len(safe), "unsafe": len(unsafe)}
+            "counts": {"safe": len(safe), "unsafe": len(unsafe)},
+            "ml": {
+                "enabled": bool(self.rf_model is not None),
+                "model": "RandomForestClassifier",
+                "artifact": RF_MODEL_PATH if self.rf_model else None
+            }
         }
